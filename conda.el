@@ -23,8 +23,17 @@
 
 ;; TODO:
 ;; - conda install / uninstall from emacs?
-;; - want to set multiple possible home dirs for envs
 ;; - make this work in addition to `pew` or `virtualenvwrapper` or similar
+;; - immediate TODO: make env-activaction accept a name or a directory, and
+;;   look up the directory in an `envs-home` if only a name is given. then
+;;   envs-home can be overridden dir-locally, and a raw dir can always be
+;;   given. dir should be absolute or relative to the current working dir,
+;;   I guess? How do I know a dir contains an env?
+;;   - for me: then I can set dir-local envs home in anaconda-platform, and
+;;     dir-local env names in platform subdirs, and my env should be correct
+;; - make sure the buffer-local env caching is working, it shouldn't be doing
+;;   a lot of work all the time
+;; - make auto-activation better?
 
 (defgroup conda nil
   "Conda (environment) manager for Emacs."
@@ -68,16 +77,17 @@ environment variable."
 
 (defvar conda-env-history nil "The history of conda envs we have worked on.")
 
-(defvar conda-env-current-name nil "Name of current conda env.")
+(defvar conda-env-current-dir nil "Directory containing current conda env.") ;; FIXME, make sure it's used
 
 (defvar conda-env-executables-dir  ;; copied from virtualenv.el
   (if (eq system-type 'windows-nt) "Scripts" "bin")
   "Name of the directory containing executables.  It is system dependent.")
 
-(defvar conda-project-env-name nil  ;; placeholder for buffer-local variable
-  "Current conda environment for the project.  Should always be buffer-local.")
+(defvar conda-project-env nil  ;; placeholder for buffer-local variable
+  "Current conda environment name or directory for the project.  Should always be buffer-local.")
+
 ;; ensure it's considered safe
-(put 'conda-project-env-name 'safe-local-variable 'stringp)
+(put 'conda-project-env 'safe-local-variable 'stringp)
 
 ;; internal utility functions
 
@@ -163,11 +173,11 @@ environment variable."
   "Clear the history of conda environments that have been activated."
   (setq conda-env-history nil))
 
-(defun conda-env-location ()
+(defun conda-env-location () ;; FIXME
   "Location of the conda environments."
   (concat (file-name-as-directory conda-anaconda-home) conda-env-subdirectory))
 
-(defun conda-env-name-to-dir (name)
+(defun conda-env-name-to-dir (name) ;; FIXME
   "Translate NAME into the directory where the environment is located."
   (let* ((env-possibilities (list (conda-env-location))) ;; can add venv-location?
          (potential-dirs (mapcar (lambda (x) (concat x "/" name))
@@ -177,7 +187,7 @@ environment variable."
         (expand-file-name (car valid-dirs))
       (error "No such conda environment: %s" name))))
 
-(defun conda-env-dir-to-name (dir)
+(defun conda-env-dir-to-name (dir)  ;; FIXME -- necessary?
   "Extract the name of a conda environment from DIR."
   (let* ((pieces (split-string dir "/"))
         (non-blank (conda--filter-blanks pieces)))
@@ -191,7 +201,7 @@ environment variable."
       (error "Some envs have the same name!"))
     candidates))
 
-(defun conda-env-candidates-from-dir (dir)
+(defun conda-env-candidates-from-dir (dir) ;; FIXME
   "Return a list of candidate environment names from DIR."
   (let ((proper-dir (file-name-as-directory (expand-file-name dir))))
     (if (not (file-accessible-directory-p proper-dir))
@@ -211,11 +221,11 @@ environment variable."
                (conda--includes-path-element proper-location p))
              path)))
 
-(defun conda-env-is-valid (name)
+(defun conda-env-name-is-valid (name)
   "Check whether NAME points to a valid conda environment."
   (conda--env-dir-is-valid (conda-env-name-to-dir name)))
 
-(defun conda-env-read-name (prompt)
+(defun conda-env-read-name (prompt) ;; FIXME
   "Do a completing read to get a candidate name, prompting with PROMPT."
   (let ((candidates (conda-env-candidates)))
     ;; purge history of no longer existant candidates first
@@ -229,7 +239,7 @@ environment variable."
 ;; potentially interactive user-exposed functions
 
 ;;;###autoload
-(defun conda-env-deactivate ()
+(defun conda-env-deactivate () ;; FIXME
   "Deactivate the current conda env."
   (interactive)
   (run-hooks 'conda-predeactivate-hook)
@@ -247,25 +257,26 @@ environment variable."
     (message "conda env deactivated")))
 
 ;;;###autoload
-(defun conda-env-activate (&optional name)
-  "Switch to environment NAME, prompting if called interactively."
+(defun conda-env-activate (&optional name-or-directory)
+  "Switch to environment NAME-OR-DIRECTORY, prompting if called interactively."
   (interactive)
-  (let ((env-name (or name (conda--get-env-name))))
-    (if (not (conda-env-is-valid env-name))
-        (error "Invalid conda environment specified: %s" env-name)
+  (let* ((target-env (or name-or-directory (conda--get-env-name)))
+         (env-dir (or (conda--env-dir-is-valid target-env)
+                      (conda-env-name-to-dir target-env))))
+    (if (not (conda-env-is-valid env-dir))
+        (error "Invalid conda environment specified: %s" env-dir)
       ;; first, deactivate any existing env
       (conda-env-deactivate)
       ;; set the state of the environment, including setting (or re-setting)
       ;; a buffer-local variable that allows us to skip discovery when we
       ;; switch back into the buffer.
-      (setq conda-env-current-name env-name)
-      (set (make-local-variable 'conda-project-env-name) env-name)
+      (setq conda-env-current-dir env-dir)
+      (set (make-local-variable 'conda-buffer-env-name) env-dir)
       ;; run hooks
       (run-hooks 'conda-preactivate-hook)
       ;; push it onto the history
-      (add-to-list 'conda-env-history conda-env-current-name)
-      (let* ((env-dir (conda-env-name-to-dir env-name))
-             (env-exec-dir (concat (file-name-as-directory env-dir)
+      (add-to-list 'conda-env-history conda-env-current-dir)
+      (let ((env-exec-dir (concat (file-name-as-directory env-dir)
                                    conda-env-executables-dir)))
         ;; Use pythonic to activate the environment so that anaconda-mode and
         ;; others know how to work on this
@@ -285,7 +296,7 @@ environment variable."
 
 ;; for hilarious reasons to do with bytecompiling, this has to be here
 ;; instead of below
-(defmacro conda-with-env (name &rest forms)
+(defmacro conda-with-env (name &rest forms) ;; FIXME
   "With conda env NAME active, evaluate FORMS."
   `(progn
      (let ((prev-dir default-directory)
@@ -385,15 +396,17 @@ environment variable."
   "Activate the conda environment implied by the current buffer.
 
 This can be set by a buffer-local or project-local variable (e.g. a
-`.dir-locals.el` that defines `conda-project-env-name`), or inferred from an
+`.dir-locals.el` that defines `conda-project-env`), or inferred from an
 `environment.yml` or similar at the project level."
   (interactive)
-  (let ((env-name (if conda-project-env-name
-                      conda-project-env-name
-                    (conda--infer-env-from-buffer))))
-    (if (not env-name)
+  (let ((env-dir (if (not conda-project-env)
+                     (conda--infer-env-from-buffer)
+                   (if (conda--env-dir-is-valid conda-project-env)
+                       conda-project-env
+                     (conda-env-name-to-dir conda-project-env)))))
+    (if (not env-dir)
         (message "No conda environment for file <%s>" (buffer-file-name))
-      (conda-env-activate env-name))))
+      (conda-env-activate env-dir))))
 
 (defun conda--switch-buffer-auto-activate (&rest args)
   "Add conda env activation if a buffer has a file, handling ARGS."
